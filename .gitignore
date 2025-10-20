@@ -1,0 +1,6 @@
+# ignore all decompressed fasta and gff file
+*.fa
+*.fasta
+
+*.gff
+*.gff3
