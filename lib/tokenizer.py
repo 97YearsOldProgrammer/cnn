@@ -48,7 +48,7 @@ def read_fasta(filename):
 
 @dataclass
 class Feature:
-    """Representation of a single GFF feature."""
+    """ Parse Single GFF line"""
 
     seqid:  str
     source: str
@@ -106,21 +106,23 @@ class Segment:
     sequence: str
 
 def collect_segments(features, seq):
-    grouped: tp.Dict[str, tp.List[Feature]] = {}
-    for feature in gff_features:
-        if feature.type != "exon":
-            continue
+    grouped = {}
+    filter  = {"exon", "intron", "three_prime_UTR", "five_prime_UTR"}
+
+    for feature in features:
+        if feature.type not in filter: continue
         parent_id = choose_parent_id(feature)
         grouped.setdefault(parent_id, []).append(feature)
 
-    transcript_segments: tp.Dict[str, tp.List[Segment]] = {}
+    transcripts = {}
 
     for parent_id, exons in grouped.items():
         if not exons:
             continue
-        seqid = exons[0].seqid
-        strand = exons[0].strand
-        if seqid not in sequences:
+
+        seqid   = exons[0].seqid
+        strand  = exons[0].strand
+        if seqid not in seq:
             raise KeyError(f"Sequence '{seqid}' referenced in GFF but absent from FASTA")
         genome_seq = sequences[seqid]
 
