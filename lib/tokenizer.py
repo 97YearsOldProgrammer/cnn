@@ -6,11 +6,17 @@ import typing as tp
 from contextlib     import closing
 from dataclasses    import dataclass
 
+from __future__ import annotations
+
+
+
 def anti(seq):
 	comp = str.maketrans('ACGTRYMKBDHVNacgtrymkbdhvn', 'TGCAYRKMVHDBNtgcayrkmvhdbn')
 	anti = seq.translate(comp)[::-1]
 	return anti
-    
+
+
+
 #####################
 ## UTILITY SECTION ##
 #####################
@@ -37,10 +43,10 @@ def read_fasta(filename):
 			if len(seqs) > 0:
 				seq = ''.join(seqs)
 				yield(name, seq)
-				name = line[1:]
+				name = line[1:].split()[0]
 				seqs = []
 			else:
-				name = line[1:]
+				name = line[1:].split()[0]
 		else:
 			seqs.append(line)
 	yield(name, ''.join(seqs))
@@ -60,9 +66,11 @@ class Feature:
     phase:  tp.Optional[int]
     att:    tp.Dict[str, str]
     
-def read_gff(filename):
+def parse_gff(filename):
     
-    fp = getfp(filename)
+    fp          = getfp(filename)
+    features    = []
+
     with closing(fp):
         for line in fp:
             line = line.strip()
@@ -74,7 +82,7 @@ def read_gff(filename):
             seqid, source, typ, beg, end, score, strand, phase, att = line
             score = None if score == "." else float(score)
             phase = None if phase == "." else int(phase)
-            yield Feature(
+            feature = Feature(
                 seqid=  seqid,
                 source= source,
                 typ=    typ.lower(),
@@ -85,6 +93,9 @@ def read_gff(filename):
                 phase=  phase
                 att=    att,
             )
+            features.append(feature)
+
+    return features
 
 def choose_parent_id(feature):
     if "Parent" in feature.att:
@@ -94,93 +105,69 @@ def choose_parent_id(feature):
     return feature.seqid
 
 @dataclass
-class Segment:
-    """Continuous exon or intron sequence for a transcript."""
+class Word:
+    typ:       str
+    bps:       str
+    strand:    str
 
-    parent_id: str
-    kind: str
-    seqid: str
-    start: int
-    end: int
-    strand: str
-    sequence: str
+def filter_gff(features, seqs):
 
-def collect_segments(features, seq):
-    grouped = {}
-    filter  = {"exon", "intron", "three_prime_UTR", "five_prime_UTR"}
+    gff = {}
+    filter  = {"exon", "intron"}
 
     for feature in features:
         if feature.type not in filter: continue
         parent_id = choose_parent_id(feature)
-        grouped.setdefault(parent_id, []).append(feature)
+        gff.setdefault(parent_id, []).append(feature)
 
-    transcripts = {}
+    return gff
 
-    for parent_id, exons in grouped.items():
-        if not exons:
-            continue
+def build_line(features, seqid, strand, seq):
 
-        seqid   = exons[0].seqid
-        strand  = exons[0].strand
-        if seqid not in seq:
-            raise KeyError(f"Sequence '{seqid}' referenced in GFF but absent from FASTA")
-        genome_seq = sequences[seqid]
+    line = []
 
-        ordered_exons = sorted(exons, key=lambda feat: feat.start)
+    # iterate through all feature under a parent ID
+    for feature in features:
 
-        ordered_segments: tp.List[Segment] = []
-        for idx, exon in enumerate(ordered_exons):
-            if exon.seqid != seqid:
-                raise ValueError(
-                    f"Transcript {parent_id} has exons on multiple sequences "
-                    f"({seqid} vs {exon.seqid})"
-                )
-            if exon.strand != strand:
-                raise ValueError(
-                    f"Transcript {parent_id} mixes strands ({strand} vs {exon.strand})"
-                )
-            exon_seq = genome_seq[exon.start - 1 : exon.end]
-            if strand == "-":
-                exon_seq = reverse_complement(exon_seq)
-            ordered_segments.append(
-                Segment(
-                    parent_id=parent_id,
-                    kind="exon",
-                    seqid=seqid,
-                    start=exon.start,
-                    end=exon.end,
-                    strand=strand,
-                    sequence=exon_seq,
-                )
+        if feature.seqid != seqid:
+            raise ValueError(
+                f"Transcript {seqid} has exons on multiple sequences "
+                f"({seqid} vs {feature.seqid})"
             )
-            if idx == len(ordered_exons) - 1:
-                continue
-            next_exon = ordered_exons[idx + 1]
-            intron_start = exon.end + 1
-            intron_end = next_exon.start - 1
-            if intron_start > intron_end:
-                continue
-            intron_seq = genome_seq[intron_start - 1 : intron_end]
-            if strand == "-":
-                intron_seq = reverse_complement(intron_seq)
-            ordered_segments.append(
-                Segment(
-                    parent_id=parent_id,
-                    kind="intron",
-                    seqid=seqid,
-                    start=intron_start,
-                    end=intron_end,
-                    strand=strand,
-                    sequence=intron_seq,
-                )
+            
+        if feature.strand != strand:
+            raise ValueError(
+                f"Transcript {seqid} mixes strands ({strand} vs {feature.strand})"
             )
-
+        
+        word = seq[feature.beg-1 : feature.end-1]
         if strand == "-":
-            ordered_segments.reverse()
+            word = anti(word)
+        line.append(word)
 
-        transcript_segments[parent_id] = ordered_segments
+    return line
 
-    return transcript_segments
+def collect_segments(features, sequences: tp.Dict[str, str]):
+    grouped: tp.Dict[str, tp.List[Feature]] = {}
+
+    transcript= {}
+
+    for parent_id, feature in grouped.items():
+        if not feature:
+            continue
+        seqid   = feature[0].seqid
+        strand  = feature[0].strand
+
+        if seqid not in sequences:
+            raise KeyError(f"Sequence '{seqid}' referenced in GFF but absent from FASTA")
+        
+        seq     = sequences[seqid]
+        feature = sorted(feature, key=lambda x: x.beg)
+        line    = build_line(feature, seqid, strand, seq)
+        transcript.append(line)
+    
+    return transcript
+
 
 def build_segment_ids(
     segments: tp.Dict[str, tp.List[Segment]],
@@ -203,9 +190,9 @@ def build_segment_ids(
 
     return sentences, segment_vocab
     
-############################
-#### Glove Tokenisation ####
-############################
+######################
+#### Tokenisation ####
+######################
 
 BASE_PAIR = ("A", "C", "G", "T")
 BASE2IDX = {base: idx for idx, base in enumerate(BASE_PAIR)}
