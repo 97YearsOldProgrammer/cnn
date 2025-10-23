@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gzip
 import sys
 import torch
@@ -6,7 +8,6 @@ import typing as tp
 from contextlib     import closing
 from dataclasses    import dataclass
 
-from __future__ import annotations
 
 
 
@@ -27,8 +28,7 @@ def getfp(filename):
 		return gzip.open(filename, 'rt', encoding='ISO-8859-1')
 	elif filename == '-':
 		return sys.stdin
-	else:
-		return open(filename)
+	return open(filename)
 
 def read_fasta(filename):
 
@@ -65,7 +65,28 @@ class Feature:
     strand: str
     phase:  tp.Optional[int]
     att:    tp.Dict[str, str]
-    
+
+def parse_att(att):
+
+    attributes = {}
+
+    if not att or att == ".":
+        return attributes
+
+    for stuff in att.split(";"):
+        stuff = stuff.strip()
+        if not stuff:
+            continue
+        if "=" in stuff:
+            key, value = stuff.split("=", 1)
+        elif " " in stuff:
+            key, value = stuff.split(" ", 1)
+        else:
+            key, value = stuff, ""
+        attributes[key.strip()] = value.strip()
+
+    return attributes
+
 def parse_gff(filename):
     
     fp          = getfp(filename)
@@ -73,24 +94,31 @@ def parse_gff(filename):
 
     with closing(fp):
         for line in fp:
+            
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             line = line.split("\t")
             if len(line) != 9:
                 raise ValueError(f"Malformed GFF line: {line.rstrip()}")
+            
             seqid, source, typ, beg, end, score, strand, phase, att = line
             score = None if score == "." else float(score)
             phase = None if phase == "." else int(phase)
+            
+            att   = parse_att(att)
+            if not att:
+                continue
+            
             feature = Feature(
                 seqid=  seqid,
                 source= source,
                 typ=    typ.lower(),
                 beg=    int(beg),
                 end=    int(end),
-                score=  score,
+                score=  None if score == "." else float(score),
                 strand= strand,
-                phase=  phase
+                phase=  None if phase == "." else int(phase),
                 att=    att,
             )
             features.append(feature)
@@ -104,30 +132,27 @@ def choose_parent_id(feature):
         return feature.att["ID"]
     return feature.seqid
 
-@dataclass
-class Word:
-    typ:       str
-    bps:       str
-    strand:    str
+INCLUDE_UTR = {"exon", "intron", "three_prime_UTR", "five_prime_UTR"}
+EXCLUDE_UTR = {"exon", "intron"}
 
-def filter_gff(features, seqs):
+def group_features(features, filter):
 
-    gff = {}
+    group = {}
     filter  = {"exon", "intron"}
 
     for feature in features:
         if feature.type not in filter: continue
         parent_id = choose_parent_id(feature)
-        gff.setdefault(parent_id, []).append(feature)
+        group.setdefault(parent_id, []).append(feature)
 
-    return gff
+    return group
 
 def build_line(features, seqid, strand, seq):
 
     line = []
 
     # iterate through all feature under a parent ID
-    for feature in features:
+    for feature in sorted(features, key=lambda x: x.beg):
 
         if feature.seqid != seqid:
             raise ValueError(
@@ -147,58 +172,47 @@ def build_line(features, seqid, strand, seq):
 
     return line
 
-def collect_segments(features, sequences: tp.Dict[str, str]):
-    grouped: tp.Dict[str, tp.List[Feature]] = {}
+def build_transcript(grouped, sequences):
 
-    transcript= {}
-
-    for parent_id, feature in grouped.items():
-        if not feature:
+    transcripts = {}
+    
+    for parent_id, features in grouped.items():
+        if not features:
             continue
-        seqid   = feature[0].seqid
-        strand  = feature[0].strand
-
-        if seqid not in sequences:
-            raise KeyError(f"Sequence '{seqid}' referenced in GFF but absent from FASTA")
         
-        seq     = sequences[seqid]
-        feature = sorted(feature, key=lambda x: x.beg)
-        line    = build_line(feature, seqid, strand, seq)
-        transcript.append(line)
+        seqid   = features[0].seqid
+        strand  = features[0].strand
+        
+        if seqid not in sequences:
+            raise KeyError(
+                f"Sequence '{seqid} referenced in GFF but absent from FASTA"
+            )
+
+        seq = sequences[seqid]
+        transcripts[parent_id] = build_line(features, seqid, strand, seq)
+
+    return transcripts
+
+def tokenize_transcript(transcripts, tokenizer):
+
+    tokenized = {}
     
-    return transcript
+    for parent_id, words in transcripts.item():
+        line = []
+        for word in words:
+            line.extend(tokenizer(word).tolist())
+        tokenized[parent_id] = torch.tensor(line, dtype=torch.long)
 
-
-def build_segment_ids(
-    segments: tp.Dict[str, tp.List[Segment]],
-    tokenizer: KMerTokenizer,
-) -> tp.Tuple[tp.Dict[str, tp.List[int]], tp.Dict[tp.Tuple[str, ...], int]]:
-    sentences: tp.Dict[str, tp.List[int]] = {}
-    segment_vocab: tp.Dict[tp.Tuple[str, ...], int] = {}
-
-    for parent_id, items in segments.items():
-        words: tp.List[int] = []
-        for segment in items:
-            token_tensor = tokenizer(segment.sequence)
-            token_ids = tuple(str(x) for x in token_tensor.tolist())
-            key = (segment.kind,) + token_ids
-            if key not in segment_vocab:
-                segment_vocab[key] = len(segment_vocab)
-            words.append(segment_vocab[key])
-        if words:
-            sentences[parent_id] = words
-
-    return sentences, segment_vocab
-    
+    return tokenized
+            
 ######################
 #### Tokenisation ####
 ######################
 
-BASE_PAIR = ("A", "C", "G", "T")
-BASE2IDX = {base: idx for idx, base in enumerate(BASE_PAIR)}
+BASE_PAIR   = ("A", "C", "G", "T")
+BASE2IDX    = {base: idx for idx, base in enumerate(BASE_PAIR)}
 
 def apkmer(k: int, bps):
-    "Generate All Possible K Kmer"
 
     if k <= 0:
         raise ValueError("k must be a positive integer")
@@ -217,7 +231,7 @@ class KMerTokenizer:
 
     k           : int
     stride      : int = 1
-    vocabulary  : Sequence[str]
+    vocabulary  : list
     unk_token   : None
 
     def __post_init__(self):
@@ -228,7 +242,7 @@ class KMerTokenizer:
         if self.unk_token is not None and self.unk_token not in self.token2id:
             self.token2id[self.unk_token] = len(self.token2id)
 
-    def __call__(self, seq) -> torch.Tensor:
+    def __call__(self, seq):
         seq     = seq.upper()
         tokens  = []
 
