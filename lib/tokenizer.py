@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import gzip
 import sys
-import torch
-
 import typing as tp
 from contextlib     import closing
 from dataclasses    import dataclass
@@ -97,7 +95,7 @@ def parse_gff(filename):
                 continue
             line = line.split("\t")
             if len(line) != 9:
-                raise ValueError(f"Malformed GFF line: {line.rstrip()}")
+                continue
             
             seqid, source, typ, beg, end, score, strand, phase, att = line
             score = None if score == "." else float(score)
@@ -113,9 +111,9 @@ def parse_gff(filename):
                 typ=    typ.lower(),
                 beg=    int(beg),
                 end=    int(end),
-                score=  None if score == "." else float(score),
+                score=  score,
                 strand= strand,
-                phase=  None if phase == "." else int(phase),
+                phase=  phase,
                 att=    att,
             )
             features.append(feature)
@@ -194,7 +192,7 @@ def tokenize_transcripts(transcripts, tokenizer):
     for parent_id, segments in transcripts.items():
         token_ids = []
         for segment in segments:
-            token_ids.extend(tokenizer(segment).tolist())
+            token_ids.extend(tokenizer(segment))
         tokenized[parent_id] = token_ids
 
     return tokenized
@@ -246,7 +244,7 @@ class KmerTokenizer:
             tokens.append(self.token2id.get(token, self.token2id.get(self.unk_token, 0)))
         if not tokens:
             tokens.append(self.token2id.get(self.unk_token, 0))
-        return torch.tensor(tokens, dtype=torch.long)
+        return tokens
 
 ################
 #### Output ####

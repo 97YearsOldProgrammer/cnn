@@ -4,3 +4,6 @@
 
 *.gff
 *.gff3
+
+# all pycache
+*.pyc
