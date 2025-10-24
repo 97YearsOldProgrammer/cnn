@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import gzip
 import sys
+import os
+import re
 import typing as tp
+
+from pathlib        import Path
 from contextlib     import closing
 from dataclasses    import dataclass
 
@@ -46,6 +50,33 @@ def read_fasta(filename):
 			seqs.append(line)
 	yield(name, ''.join(seqs))
 	fp.close()
+
+def find_files(input_path):
+
+	fa      = re.compile(r'\.(fasta|fa|fna)(\.gz)?$', re.IGNORECASE)
+	gff     = re.compile(r'\.(gff|gff3)(\.gz)?$', re.IGNORECASE)
+ 
+	fastas  = []
+	gffs    = []
+	
+	input_path = Path(input_path)
+	
+	if not input_path.exists():
+		raise FileNotFoundError(f"Input path does not exist: {input_path}")
+	
+	if not input_path.is_dir():
+		raise ValueError(f"Input path must be a directory: {input_path}")
+	
+	for root, dirs, files in os.walk(input_path):
+		for file in files:
+			filepath = os.path.join(root, file)
+			
+			if fa.search(file):
+				fastas.append(filepath)
+			elif gff.search(file):
+				gffs.append(filepath)
+	
+	return fastas, gffs
 
 @dataclass
 class Feature:

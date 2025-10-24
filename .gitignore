@@ -5,5 +5,9 @@
 *.gff
 *.gff3
 
-# all pycache
+# ignore all pycache
 *.pyc
+__pycache__/
+
+# ignore all tokenized corpus files
+corpus/
