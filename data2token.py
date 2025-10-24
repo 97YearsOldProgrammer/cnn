@@ -1,119 +1,69 @@
-"""Build a GloVe-ready corpus from FASTA and GFF annotations."""
-
-from __future__ import annotations
-
 import argparse
-import json
-import logging
-from dataclasses import dataclass
 
-from lib.cnn import KMerTokenizer, apkmer, get_filepointer, read_fasta
+from lib import tokenizer as tk
 
+parser = argparse.ArgumentParser(
+    description="Tokenise FASTA/GFF annotations into a corpus for GloVe.")
 
+parser.add_argument("fasta", required=True, type=str,
+    help="Path to the FASTA file.")
+parser.add_argument("gff", required=True, type=str,
+    help="Path to the GFF/GFF3 file.")
+parser.add_argument("--output", required=True, type=str,
+    help="Destination file for the generated corpus (plain text).")
+parser.add_argument("--kmer", type=int, default=3,
+    help="Size of the sliding k-mer window used for tokenisation [%(default)i].")
+parser.add_argument("--stride", type=int, default=1,
+    help="Stride of the sliding window used in the tokenizer [%(default)i].")
+parser.add_argument("--unk-token", default="<UNK>", type=str,
+    help="Unknown token for unseen k-mers [%(default)s].")
+parser.add_argument("--include-utr", action="store_true",
+    help="Include UTR regions (5' and 3' UTRs) in transcripts.")
+parser.add_argument("--feature-types", type=str, default=None,
+    help="Comma-separated feature types to include (e.g., 'exon,cds'). Overrides --include-utr.")
+parser.add_argument("--min-exon", type=int, default=0,
+    help="Minimum exon length to include [%(default)i].")
+parser.add_argument("--min-intron", type=int, default=0,
+    help="Minimum intron length to include [%(default)i].")
 
-
-
-def write_corpus(output_path: str, sentences: tp.Dict[str, tp.List[int]]) -> None:
-    with open(output_path, "w", encoding="utf-8") as fp:
-        for parent_id in sorted(sentences):
-            tokens = " ".join(str(token) for token in sentences[parent_id])
-            fp.write(tokens + "\n")
-
-
-def write_segment_vocab(
-    vocab_path: str,
-    segment_vocab: tp.Dict[tp.Tuple[str, ...], int],
-) -> None:
-    reverse_vocab = {value: list(key) for key, value in segment_vocab.items()}
-    with open(vocab_path, "w", encoding="utf-8") as fp:
-        json.dump(reverse_vocab, fp, indent=2)
-
-
-def build_tokenizer(args: argparse.Namespace) -> KMerTokenizer:
-    alphabet = tuple(args.alphabet.upper())
-    vocabulary = apkmer(args.kmer, alphabet)
-    return KMerTokenizer(
-        k=args.kmer,
-        stride=args.stride,
-        vocabulary=vocabulary,
-        unk_token=args.unk_token,
-    )
+arg = parser.parse_args()
 
 
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Tokenise FASTA/GFF annotations into a GloVe-ready corpus "
-            "of exon and intron segments."
-        )
-    )
-    parser.add_argument(
-        "--model-name",
-        required=True,
-        help="Identifier for the data model; used for logging only.",
-    )
-    parser.add_argument("--fasta", required=True, help="Path to the FASTA file.")
-    parser.add_argument("--gff", required=True, help="Path to the GFF/GFF3 file.")
-    parser.add_argument(
-        "--output",
-        required=True,
-        help="Destination file for the generated corpus (plain text).",
-    )
-    parser.add_argument(
-        "--kmer",
-        type=int,
-        required=True,
-        help="Size of the sliding k-mer window used for tokenisation.",
-    )
-    parser.add_argument(
-        "--stride",
-        type=int,
-        default=1,
-        help="Stride of the sliding window used in the tokenizer.",
-    )
-    parser.add_argument(
-        "--alphabet",
-        default="ACGT",
-        help="Alphabet used to generate the k-mer vocabulary (default: ACGT).",
-    )
-    parser.add_argument(
-        "--unk-token",
-        default=None,
-        help="Optional unknown token for unseen k-mers.",
-    )
-    parser.add_argument(
-        "--segment-vocab",
-        help=(
-            "Optional path to a JSON file describing how each segment id maps "
-            "to the underlying k-mer tokens."
-        ),
-    )
-    return parser.parse_args()
 
+# Determine which feature types to include
+if arg.feature_types:
+    feature_filter = set(ft.strip().lower() for ft in arg.feature_types.split(","))
+elif arg.include_utr:
+    feature_filter = {"exon", "cds", "three_prime_utr", "five_prime_utr"}
+else:
+    feature_filter = {"exon", "cds"}
 
-def main() -> None:
-    args = parse_arguments()
+sequences = {}
+for name, seq in tk.read_fasta(arg.fasta):
+    if name is None:
+        continue
+    sequences[name] = seq
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logging.info("Preparing corpus for model '%s'", args.model_name)
+features    = tk.parse_gff(arg.gff)
+grouped     = tk.group_features(features, feature_filter)
 
-    sequences = load_sequences(args.fasta)
-    features = list(read_gff(args.gff))
-    segments = collect_segments(features, sequences)
+# Build transcripts from sequences
+transcripts = tk.build_transcript(grouped, sequences)
 
-    tokenizer = build_tokenizer(args)
-    sentences, segment_vocab = build_segment_ids(segments, tokenizer)
+if not transcripts:
+    raise RuntimeError("No transcripts were built; corpus is empty.")
 
-    if not sentences:
-        raise RuntimeError("No exon annotations were found; corpus is empty.")
+# Create tokenizer
+vocabulary  = tk.apkmer(arg.kmer)
+tokenizer   = tk.KmerTokenizer(
+    k=arg.kmer, 
+    stride=arg.stride, 
+    vocabulary=vocabulary, 
+    unk_token=arg.unk_token
+)
 
-    write_corpus(args.output, sentences)
-    logging.info("Wrote %d sentences to %s", len(sentences), args.output)
+# Tokenize transcripts
+tokenized = tk.tokenize_transcripts(transcripts, tokenizer)
 
-    if args.segment_vocab:
-        write_segment_vocab(args.segment_vocab, segment_vocab)
-        logging.info("Saved segment vocabulary to %s", args.segment_vocab)
-
-
-if __name__ == "__main__":
-    main()
+# Write corpus
+tk.write_tokenized_corpus(arg.output, tokenized)

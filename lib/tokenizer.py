@@ -9,13 +9,10 @@ from contextlib     import closing
 from dataclasses    import dataclass
 
 
-
-
 def anti(seq):
 	comp = str.maketrans('ACGTRYMKBDHVNacgtrymkbdhvn', 'TGCAYRKMVHDBNtgcayrkmvhdbn')
 	anti = seq.translate(comp)[::-1]
 	return anti
-
 
 
 #####################
@@ -126,22 +123,19 @@ def parse_gff(filename):
     return features
 
 def choose_parent_id(feature):
+    
     if "Parent" in feature.att:
         return feature.att["Parent"].split(",")[0]
     if "ID" in feature.att:
         return feature.att["ID"]
     return feature.seqid
 
-INCLUDE_UTR = {"exon", "intron", "three_prime_UTR", "five_prime_UTR"}
-EXCLUDE_UTR = {"exon", "intron"}
-
 def group_features(features, filter):
 
     group = {}
-    filter  = {"exon", "intron"}
 
     for feature in features:
-        if feature.type not in filter: continue
+        if feature.typ not in filter: continue
         parent_id = choose_parent_id(feature)
         group.setdefault(parent_id, []).append(feature)
 
@@ -165,7 +159,7 @@ def build_line(features, seqid, strand, seq):
                 f"Transcript {seqid} mixes strands ({strand} vs {feature.strand})"
             )
         
-        word = seq[feature.beg-1 : feature.end-1]
+        word = seq[feature.beg-1 : feature.end]
         if strand == "-":
             word = anti(word)
         line.append(word)
@@ -185,7 +179,7 @@ def build_transcript(grouped, sequences):
         
         if seqid not in sequences:
             raise KeyError(
-                f"Sequence '{seqid} referenced in GFF but absent from FASTA"
+                f"Sequence '{seqid}' referenced in GFF but absent from FASTA"
             )
 
         seq = sequences[seqid]
@@ -193,15 +187,15 @@ def build_transcript(grouped, sequences):
 
     return transcripts
 
-def tokenize_transcript(transcripts, tokenizer):
+def tokenize_transcripts(transcripts, tokenizer):
 
     tokenized = {}
     
-    for parent_id, words in transcripts.item():
-        line = []
-        for word in words:
-            line.extend(tokenizer(word).tolist())
-        tokenized[parent_id] = torch.tensor(line, dtype=torch.long)
+    for parent_id, segments in transcripts.items():
+        token_ids = []
+        for segment in segments:
+            token_ids.extend(tokenizer(segment).tolist())
+        tokenized[parent_id] = token_ids
 
     return tokenized
             
@@ -212,29 +206,28 @@ def tokenize_transcript(transcripts, tokenizer):
 BASE_PAIR   = ("A", "C", "G", "T")
 BASE2IDX    = {base: idx for idx, base in enumerate(BASE_PAIR)}
 
-def apkmer(k: int, bps):
+def apkmer(k: int):
 
     if k <= 0:
         raise ValueError("k must be a positive integer")
-    if not bps:
-        raise ValueError("throw valid array of bps")
 
     if k == 1:
-        return list(bps)
+        return list(BASE_PAIR)
 
-    next = apkmer(k - 1, bps)
-    return [prefix + base for prefix in next for base in bps]
+    prev_kmers = apkmer(k - 1)
+    return [prefix + base for prefix in prev_kmers for base in BASE_PAIR]
 
 @dataclass
-class KMerTokenizer:
+class KmerTokenizer:
     """DNA seq to kmer ids by sliding window algo"""
 
     k           : int
     stride      : int = 1
-    vocabulary  : list
-    unk_token   : None
+    vocabulary  : list = None
+    unk_token   : str = None
 
     def __post_init__(self):
+        
         # map allkmer with a int
         self.token2id = {token: idx for idx, token in enumerate(self.vocabulary)}
 
@@ -243,6 +236,7 @@ class KMerTokenizer:
             self.token2id[self.unk_token] = len(self.token2id)
 
     def __call__(self, seq):
+        
         seq     = seq.upper()
         tokens  = []
 
@@ -253,3 +247,14 @@ class KMerTokenizer:
         if not tokens:
             tokens.append(self.token2id.get(self.unk_token, 0))
         return torch.tensor(tokens, dtype=torch.long)
+
+################
+#### Output ####
+################
+
+def write_tokenized_corpus(output_path, tokenized):
+    
+    with open(output_path, "w", encoding="utf-8") as fp:
+        for parent_id in sorted(tokenized):
+            token_line = " ".join(str(token_id) for token_id in tokenized[parent_id])
+            fp.write(token_line + "\n")
