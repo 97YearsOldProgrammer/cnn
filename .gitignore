@@ -11,3 +11,6 @@ __pycache__/
 
 # ignore all tokenized corpus files
 corpus/
+
+# ignore all trainning files
+*.txt
